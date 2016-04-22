@@ -57,6 +57,40 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
   }
 
   // These benchmark are skipped in normal build
+  ignore("range/sum") {
+    val N = 500L << 20
+    runBenchmark("rang/sum", N) {
+      sqlContext.range(N).groupBy().sum().collect()
+    }
+    /*
+    Intel(R) Core(TM) i7-4558U CPU @ 2.80GHz
+    rang/filter/sum:                    Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+    -------------------------------------------------------------------------------------------
+    rang/filter/sum codegen=false          14332 / 16646         36.0          27.8       1.0X
+    rang/filter/sum codegen=true              897 / 1022        584.6           1.7      16.4X
+    */
+  }
+
+  // These benchmark are skipped in normal build
+  test("select-nvl") {
+    val N = 500L << 20
+    runBenchmark("select-nvl", N) {
+      sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1").selectExpr("C5 * 2 as foo")
+    }
+    /*
+select-nvl:                         Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+select-nvl codegen=true(nvl)                   199 /  283       2638.9           0.4       1.0X
+
+select-nvl:                         Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+select-nvl codegen=false                  270 /  351       1938.3           0.5       1.0X
+select-nvl codegen=true                   170 /  209       3091.0           0.3       1.6X
+    */
+  }
+
+
+  // These benchmark are skipped in normal build
   ignore("range/filter/sum") {
     val N = 500L << 20
     runBenchmark("rang/filter/sum", N) {

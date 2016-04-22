@@ -17,6 +17,11 @@
 
 package org.apache.spark.sql.execution
 
+import java.util
+
+import edu.mit.nvl.llvm.runtime.LlvmCompiler
+import edu.mit.nvl.parser.NvlParser
+import org.apache.spark.sql.execution.vectorized.{ColumnarBatch, OffHeapColumnVector}
 import org.apache.spark.{broadcast, TaskContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
@@ -30,6 +35,9 @@ import org.apache.spark.sql.execution.joins.{BroadcastHashJoin, SortMergeJoin}
 import org.apache.spark.sql.execution.metric.{LongSQLMetricValue, SQLMetrics}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types._
+
+import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 
 /**
  * An interface for those physical operators that support codegen.
@@ -343,44 +351,269 @@ case class WholeStageCodegen(child: SparkPlan) extends UnaryNode with CodegenSup
     (ctx, cleanedSource)
   }
 
-  override def doExecute(): RDD[InternalRow] = {
-    val (ctx, cleanedSource) = doCodeGen()
-    val references = ctx.references.toArray
+  /*
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
 
+rang/sum:                           Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+rang/sum codegen=false                 13017 / 13872         40.3          24.8       1.0X
+rang/sum codegen=true                    1358 / 1450        385.9           2.6       9.6X
+
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+rang/sum:                           Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+rang/sum codegen=false                 12895 / 14447         40.7          24.6       1.0X
+rang/sum codegen=true                     380 /  435       1380.0           0.7      33.9X
+
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+rang/sum:                           Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+rang/sum codegen=true                     543 /  675        965.7           1.0       1.0X
+   */
+
+  class NvlGeneratorException(msg: String = null, cause: Throwable = null)
+    extends java.lang.Exception(msg, cause) {}
+
+  def genExpr(e : Expression, output : Seq[Attribute]) : String = e match {
+    case Literal(v, d) => v.toString + (if (d.isInstanceOf[LongType]) "L" else "")
+    case Add(l, r) => genExpr(l, output) + " + " + genExpr(r, output)
+    case Multiply(l, r) => genExpr(l, output) + " * " + genExpr(r, output)
+    case AttributeReference(n, _, _, _) => "data" + (if (output.size > 1) "." + output.indexWhere(_.name == n) else "")
+    case Alias(c, _) => genExpr(c, output)
+    case t => throw new NvlGeneratorException(t.getClass.toString)
+  }
+
+  def nvlType(d : DataType) : String = d match {
+    case IntegerType => "int"
+    case LongType => "long"
+    case FloatType => "float"
+    case DoubleType => "double"
+    case t => throw new NvlGeneratorException(t.getClass.toString)
+  }
+
+  def genNvlHelper(sp : SparkPlan, args : ArrayBuffer[(String, String)],
+             topLevel : Boolean) : String = sp match {
+    case Project(exprs, child) =>
+      val childNvl = genNvlHelper(child, args, false)
+      val genedExprs = exprs.map(genExpr(_, child.output))
+      val outElTypes = exprs.map(e => nvlType(e.dataType))
+      val builderType =
+        if (!topLevel)
+          s"{${outElTypes.map(e => "vecBuilder[" + e + "]").mkString(", ")}}"
+        else
+          // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
+          s"vecBuilder[{long, ${outElTypes.mkString(", ")}}]"
+      val inElTypes = child.output.map(e => nvlType(e.dataType))
+      val dataType =
+        if (inElTypes.size > 1)
+          s"{${inElTypes.mkString(", ")}}"
+        else
+          inElTypes.mkString(", ")
+      val mergeValue =
+        if (topLevel) {
+          s"{0L, ${genedExprs.mkString(", ")}}"
+        } else {
+          if (genedExprs.size > 1)
+            s"{${genedExprs.mkString(", ")}}"
+          else
+            genedExprs.mkString(", ")
+        }
+      s"""
+         |data := $childNvl;
+         |res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
+         |    $builderType, (blds: $builderType, i: long,
+         |    data: $dataType) =>
+         |    merge(blds, $mergeValue)
+         |   ))
+       """.stripMargin
+    case BatchedDataSourceScan(output, _, _, _, _) =>
+      for ((out, i) <- output.zipWithIndex) {
+        args += (("$" + i, s"vec[${nvlType(out.dataType)}]"))
+      }
+      s"{${args.map(_._1).mkString(", ")}}"
+    case Range(s, 1, 1, n, _) => s"{range($s, ${s + n})}"
+    case t => throw new NvlGeneratorException(t.getClass.toString)
+  }
+
+  def genNvl(sp : SparkPlan, args : ArrayBuffer[(String, String)]) : String = {
+    val baseNvl = genNvlHelper(sp, args, true)
+    s"(${args.map(t => t._1 + ": " + t._2).mkString(", ")}) => $baseNvl"
+  }
+
+  override def doExecute(): RDD[InternalRow] = {
     val durationMs = longMetric("pipelineTime")
 
     val rdds = child.asInstanceOf[CodegenSupport].upstreams()
     assert(rdds.size <= 2, "Up to two upstream RDDs can be supported")
-    if (rdds.length == 1) {
-      rdds.head.mapPartitionsWithIndex { (index, iter) =>
-        val clazz = CodeGenerator.compile(cleanedSource)
-        val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
-        buffer.init(index, Array(iter))
-        new Iterator[InternalRow] {
-          override def hasNext: Boolean = {
-            val v = buffer.hasNext
-            if (!v) durationMs += buffer.durationMs()
-            v
+
+    /*
+    val useNvl = child match {
+      case TungstenAggregate(_, _, _, _, _, _, Range(s, 1, 1, n, output)) => true
+      case _ => false
+    }
+    */
+
+    /*
+    val useNvl = child match {
+      case Project(_, Range(s, 1, 1, n, output)) => true
+      case _ => false
+    }
+    */
+
+    /*
+    val useNvl = child match {
+      case Project(_, BatchedDataSourceScan(_, _, _, _, _)) => true
+      case _ => false
+    }
+    */
+
+    var useNvl = true
+    var nvlStr : String = null
+    val args = ArrayBuffer.empty[(String, String)]
+    try {
+      nvlStr = genNvl(child, args)
+    } catch {
+      case e : NvlGeneratorException => {
+        println(e)
+        useNvl = false
+      }
+    }
+    println(nvlStr)
+
+    if (!useNvl) {
+      val (ctx, cleanedSource) = doCodeGen()
+      val references = ctx.references.toArray
+
+      if (rdds.length == 1) {
+        rdds.head.mapPartitionsWithIndex { (index, iter) =>
+          val clazz = CodeGenerator.compile(cleanedSource)
+          val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
+          buffer.init(index, Array(iter))
+          new Iterator[InternalRow] {
+            override def hasNext: Boolean = {
+              val v = buffer.hasNext
+              if (!v) durationMs += buffer.durationMs()
+              v
+            }
+
+            override def next: InternalRow = buffer.next()
           }
-          override def next: InternalRow = buffer.next()
+        }
+      } else {
+        // Right now, we support up to two upstreams.
+        rdds.head.zipPartitions(rdds(1)) { (leftIter, rightIter) =>
+          val partitionIndex = TaskContext.getPartitionId()
+          val clazz = CodeGenerator.compile(cleanedSource)
+          val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
+          buffer.init(partitionIndex, Array(leftIter, rightIter))
+          new Iterator[InternalRow] {
+            override def hasNext: Boolean = {
+              val v = buffer.hasNext
+              if (!v) durationMs += buffer.durationMs()
+              v
+            }
+
+            override def next: InternalRow = buffer.next()
+          }
         }
       }
     } else {
-      // Right now, we support up to two upstreams.
-      rdds.head.zipPartitions(rdds(1)) { (leftIter, rightIter) =>
-        val partitionIndex = TaskContext.getPartitionId()
-        val clazz = CodeGenerator.compile(cleanedSource)
-        val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
-        buffer.init(partitionIndex, Array(leftIter, rightIter))
+/*      val code =
+        """
+          |() => agg(range(0, 524288000), 0L, (a: long, b: long) => a + b)
+        """.stripMargin*/
+      /*
+      val code =
+        """
+          |() => map(range(0, 1000), (l: long) => {0L, l * 2L})
+        """.stripMargin
+      */
+
+      // assume rdds.length == 1
+      // sqlContext.read.format("csv").option("inferSchema", "true").option("delimiter", "|").option("mode", "FAILFAST").load("/Users/joseph/tpch-perf/tpch/lineitem.tbl").write.parquet("tpch-sf1")
+      rdds.head.mapPartitionsWithIndex { (index, iter) =>
         new Iterator[InternalRow] {
+          var index = 0
+          val row = new UnsafeRow(1)
+          var lastResult : (Long, Long, Int) = (0, 0, 0)
+          var curPtr = lastResult._1
+
           override def hasNext: Boolean = {
-            val v = buffer.hasNext
-            if (!v) durationMs += buffer.durationMs()
-            v
+            iter.hasNext || index < lastResult._2
           }
-          override def next: InternalRow = buffer.next()
+
+          override def next: InternalRow = {
+            var useWriter = false
+            var writer : UnsafeRowWriter = null
+            if (index >= lastResult._2) {
+              val nvlArgs =
+                if (args.size > 0) {
+                  val cb = iter.next().asInstanceOf[ColumnarBatch]
+                  (0 until args.size).map(i => {
+                    // val cb = n.asInstanceOf[ColumnarBatch]
+                    val cv = cb.column(i).asInstanceOf[OffHeapColumnVector]
+                    (cv.valuesNativeAddress(), cb.numRows().toLong)
+                  })
+                } else {
+                  Seq.empty[(Long, Long)]
+                }
+              lastResult = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 8, None, None).run(
+                if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs)
+                .asInstanceOf[(Long, Long, Int)]
+              if (lastResult._2 == -1) {
+                useWriter = true
+                writer = new UnsafeRowWriter(new BufferHolder(row, 0), 1)
+              }
+              index = 0
+              curPtr = lastResult._1
+            }
+            index += 1
+            if (useWriter) {
+              writer.write(0, lastResult._1)
+            } else {
+              row.pointTo(null, curPtr, lastResult._3)
+            }
+            curPtr += lastResult._3
+            row
+          }
         }
       }
+      /*
+      rdds.head.mapPartitionsWithIndex { (idx, iter) =>
+        new Iterator[InternalRow] {
+          var index = 0
+          val row = new UnsafeRow(1)
+          val hasBatches = iter.hasNext
+          val batch = if (hasBatches) iter.next().asInstanceOf[ColumnarBatch] else null
+          val column = if (hasBatches) batch.column(0).asInstanceOf[OffHeapColumnVector] else null
+          val code =
+            """
+              |(v: vec[long]) => map(v, (l: long) => {0L, l * 2L})
+            """.stripMargin
+          var curPtr = if (hasBatches) LlvmCompiler.compile(new NvlParser().parseFunction(code), 1, None, None).run(column.valuesNativeAddress())
+            .asInstanceOf[(Long, Long, Int)]._1 else 0
+          println("ran!")
+          // val holder = new BufferHolder(row, 0)
+          // val writer = new UnsafeRowWriter(holder, 1)
+          override def hasNext: Boolean = {
+            hasBatches && index < 1000
+          }
+
+          override def next: InternalRow = {
+            index += 1
+            // writer.write(0, result)
+            row.pointTo(null, curPtr, 16)
+            curPtr += 16
+            row
+          }
+        }
+      }
+      */
     }
   }
 
