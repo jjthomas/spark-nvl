@@ -21,6 +21,7 @@ import java.util
 
 import edu.mit.nvl.llvm.runtime.LlvmCompiler
 import edu.mit.nvl.parser.NvlParser
+import org.apache.spark.sql.catalyst.expressions.aggregate.Sum
 import org.apache.spark.sql.execution.vectorized.{ColumnarBatch, OffHeapColumnVector}
 import org.apache.spark.{broadcast, TaskContext}
 import org.apache.spark.rdd.RDD
@@ -299,7 +300,9 @@ object WholeStageCodegen {
 case class WholeStageCodegen(child: SparkPlan) extends UnaryNode with CodegenSupport {
 
   override def output: Seq[Attribute] = child.output
+
   override def outputPartitioning: Partitioning = child.outputPartitioning
+
   override def outputOrdering: Seq[SortOrder] = child.outputOrdering
 
   override private[sql] lazy val metrics = Map(
@@ -379,16 +382,25 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
   class NvlGeneratorException(msg: String = null, cause: Throwable = null)
     extends java.lang.Exception(msg, cause) {}
 
-  def genExpr(e : Expression, output : Seq[Attribute]) : String = e match {
+  def genExpr(e: Expression, output: Seq[Attribute]): String = e match {
     case Literal(v, d) => v.toString + (if (d.isInstanceOf[LongType]) "L" else "")
-    case Add(l, r) => genExpr(l, output) + " + " + genExpr(r, output)
-    case Multiply(l, r) => genExpr(l, output) + " * " + genExpr(r, output)
+    case IsNotNull(_) => "true"
+    case And(l, r) => "(" + genExpr(l, output) + ") && (" + genExpr(r, output) + ")"
+    case Or(l, r) => "(" + genExpr(l, output) + ") || (" + genExpr(r, output) + ")"
+    case Add(l, r) => "(" + genExpr(l, output) + ") + (" + genExpr(r, output) + ")"
+    case Multiply(l, r) => "(" + genExpr(l, output) + ") * (" + genExpr(r, output) + ")"
+    case BitwiseAnd(l, r) => "(" + genExpr(l, output) + ") & (" + genExpr(r, output) + ")"
+    case EqualTo(l, r) => "(" + genExpr(l, output) + ") == (" + genExpr(r, output) + ")"
+    case GreaterThan(l, r) => "(" + genExpr(l, output) + ") > (" + genExpr(r, output) + ")"
+    case GreaterThanOrEqual(l, r) => "(" + genExpr(l, output) + ") >= (" + genExpr(r, output) + ")"
+    case LessThan(l, r) => "(" + genExpr(l, output) + ") < (" + genExpr(r, output) + ")"
+    case LessThanOrEqual(l, r) => "(" + genExpr(l, output) + ") <= (" + genExpr(r, output) + ")"
     case AttributeReference(n, _, _, _) => "data" + (if (output.size > 1) "." + output.indexWhere(_.name == n) else "")
     case Alias(c, _) => genExpr(c, output)
     case t => throw new NvlGeneratorException(t.getClass.toString)
   }
 
-  def nvlType(d : DataType) : String = d match {
+  def nvlType(d: DataType): String = d match {
     case IntegerType => "int"
     case LongType => "long"
     case FloatType => "float"
@@ -396,8 +408,16 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
     case t => throw new NvlGeneratorException(t.getClass.toString)
   }
 
-  def genNvlHelper(sp : SparkPlan, args : ArrayBuffer[(String, String)],
-             topLevel : Boolean) : String = sp match {
+  def nvlZero(d: DataType): String = d match {
+    case IntegerType => "0"
+    case LongType => "0L"
+    case FloatType => "0.0"
+    case DoubleType => "0.0"
+    case t => throw new NvlGeneratorException(t.getClass.toString)
+  }
+
+  def genNvlHelper(sp: SparkPlan, args: ArrayBuffer[(String, String)],
+                   topLevel: Boolean): String = sp match {
     case Project(exprs, child) =>
       val childNvl = genNvlHelper(child, args, false)
       val genedExprs = exprs.map(genExpr(_, child.output))
@@ -415,16 +435,97 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         else
           inElTypes.mkString(", ")
       val mergeValue =
-        if (topLevel) {
+        if (topLevel)
           s"{0L, ${genedExprs.mkString(", ")}}"
-        } else {
-          if (genedExprs.size > 1)
-            s"{${genedExprs.mkString(", ")}}"
-          else
-            genedExprs.mkString(", ")
-        }
+        else
+          s"{${genedExprs.mkString(", ")}}"
       s"""
-         |data := $childNvl;
+         |$childNvl;
+         |${if (topLevel) "" else "data := "}res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
+         |    $builderType, (blds: $builderType, i: long,
+         |    data: $dataType) =>
+         |    merge(blds, $mergeValue)
+         |   ))
+       """.
+        stripMargin
+    case Filter(cond, child) =>
+      val childNvl = genNvlHelper(child, args, false)
+      val genedCond = genExpr(cond, child.output)
+      val inElTypes = child.output.map(e => nvlType(e.dataType))
+      val dataType =
+        if (inElTypes.size > 1)
+          s"{${inElTypes.mkString(", ")}}"
+        else
+          inElTypes.mkString(", ")
+      val builderType =
+        if (!topLevel)
+          s"{${inElTypes.map(e => "vecBuilder[" + e + "]").mkString(", ")}}"
+        else
+          // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
+          s"vecBuilder[{long, ${inElTypes.mkString(", ")}}]"
+      val toMerge = (0 until child.output.size).map(i => "data" + (if (child.output.size > 1) s".$i" else ""))
+      val mergeValue =
+        if (topLevel)
+          s"{0L, ${toMerge.mkString(", ")}}"
+        else
+          s"{${toMerge.mkString(", ")}}"
+      s"""
+         |$childNvl;
+         |${if (topLevel) "" else "data := "}res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
+         |    $builderType, (blds: $builderType, i: long,
+         |    data: $dataType) =>
+         |    if ($genedCond, merge(blds, $mergeValue), blds)
+         |   ))
+       """.
+        stripMargin
+    case TungstenAggregate(_, gExpr, aExpr, _, _, _, child) =>
+      val childNvl = genNvlHelper(child, args, false)
+      if (gExpr.size > 1) {
+        throw new NvlGeneratorException("more than one groupBy expr in TungstenAggregate")
+      }
+      if (!topLevel) {
+        throw new NvlGeneratorException("aggregation only allowed at top level")
+      }
+      val genedGExpr = gExpr.map(genExpr(_, child.output))
+      val genedAExpr = aExpr.map(a => {
+        a.aggregateFunction match {
+          case Sum(c) => {
+            val cType = nvlType(c.dataType)
+            (cType, a.aggregateFunction, genExpr(c, child.output), nvlZero(c.dataType))
+          }
+          case _ => throw new NvlGeneratorException(a.aggregateFunction.getClass.toString)
+        }
+      })
+      // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
+      var typeStruct = "{" + (if (genedGExpr.size == 0) "long, " else "") + genedAExpr.map(t => t._1).mkString(", ") + "}"
+      var updateBody =
+        "{" + (if (genedGExpr.size == 0) "0L, " else "") +
+        genedAExpr.zipWithIndex.map(t => t._1._2 match {
+          case Sum(_) =>
+            val increment = if (genedGExpr.size == 0) 1 else 0
+            s"a.${t._2 + increment} + b.${t._2 + increment}"
+          case _ => ""
+        }).mkString(", ") + "}"
+      val updateFunction = s"(a: $typeStruct, b: $typeStruct) => $updateBody"
+      val builderType =
+        if (genedGExpr.size == 1) {
+          s"dictMerger[{long, ${nvlType(gExpr(0).dataType)}}, $updateFunction]"
+        } else {
+          s"merger[{0L, ${genedAExpr.map(t => t._4).mkString(", ")}}, $updateFunction, $updateFunction]"
+        }
+      val inElTypes = child.output.map(e => nvlType(e.dataType))
+      val dataType =
+        if (inElTypes.size > 1)
+          s"{${inElTypes.mkString(", ")}}"
+        else
+          inElTypes.mkString(", ")
+      val mergeValue =
+        if (genedGExpr.size == 0)
+          s"{0L, ${genedAExpr.map(t => t._3).mkString(", ")}}"
+        else
+          s"{{0L, ${genedGExpr(0)}}, {${genedAExpr.map(t => t._3).mkString(", ")}}}"
+      s"""
+         |$childNvl;
          |res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
          |    $builderType, (blds: $builderType, i: long,
          |    data: $dataType) =>
@@ -432,11 +533,18 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
          |   ))
        """.stripMargin
     case BatchedDataSourceScan(output, _, _, _, _) =>
+      if (topLevel) {
+        throw new NvlGeneratorException("don't use NVL for scan only")
+      }
       for ((out, i) <- output.zipWithIndex) {
         args += (("$" + i, s"vec[${nvlType(out.dataType)}]"))
       }
-      s"{${args.map(_._1).mkString(", ")}}"
-    case Range(s, 1, 1, n, _) => s"{range($s, ${s + n})}"
+      s"data := {${args.map(_._1).mkString(", ")}}"
+    case Range(s, 1, 1, n, _) =>
+      if (topLevel) {
+        throw new NvlGeneratorException("dont use NVL for range only")
+      }
+      s"data := {range($s, ${s + n})}"
     case t => throw new NvlGeneratorException(t.getClass.toString)
   }
 
@@ -484,6 +592,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       }
     }
     println(nvlStr)
+    val hasRange = if (nvlStr != null) nvlStr.contains("range") else false
 
     if (!useNvl) {
       val (ctx, cleanedSource) = doCodeGen()
@@ -535,21 +644,46 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       */
 
       // assume rdds.length == 1
+      // sqlContext.sparkContext.hadoopConfiguration.setBoolean("parquet.enable.dictionary", false)
       // sqlContext.read.format("csv").option("inferSchema", "true").option("delimiter", "|").option("mode", "FAILFAST").load("/Users/joseph/tpch-perf/tpch/lineitem.tbl").write.parquet("tpch-sf1")
+      // val df2 = df.withColumn("shipdate", df("C10").cast(StringType)).withColumn("quantity", df("C4").cast(LongType))
+      // val toLong = udf[Long, String]( _.split(" ")(0).replace("-", "").toLong)
+      // df2.withColumn("shipdate_long", toLong(df2("shipdate"))).select("shipdate_long", "C6", "quantity", "C5").write.parquet("tpch-sf1-q6")
+      // sqlContext.read.parquet("tpch-sf1-q6-nodict").filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)").explain
+      // val C8toLong = udf[Long, String]( s => if (s == "N") 0L else if (s == "R") 1L else 2L)
+      // val C9toLong = udf[Long, String]( s => if (s == "O") 0L else 1L)
+      // sqlContext.read.parquet("tpch-sf1-q1").filter("shipdate_long <= 19981111").selectExpr("quantity", "C5", "C6", "C5 * (1 - C6) as a", "C5 * (1 - C6) * (1 + C7) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "C5", "C6", "a", "b")
       rdds.head.mapPartitionsWithIndex { (index, iter) =>
         new Iterator[InternalRow] {
           var index = 0
           val row = new UnsafeRow(1)
           var lastResult : (Long, Long, Int) = (0, 0, 0)
           var curPtr = lastResult._1
+          val cm = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 1, None, None)
+          // TODO hack for range
+          var firstNext = true
 
           override def hasNext: Boolean = {
-            iter.hasNext || index < lastResult._2
+            /*
+            println("START")
+            println(iter.hasNext)
+            println(iter.getClass.toString)
+            println(index)
+            println(lastResult._2)
+            println("END")
+            */
+            if (!hasRange) {
+              index < lastResult._2 || iter.hasNext
+            } else {
+              firstNext || index < lastResult._2
+            }
           }
 
           override def next: InternalRow = {
+            firstNext = false
             var useWriter = false
             var writer : UnsafeRowWriter = null
+            // println("NEXT CALLED")
             if (index >= lastResult._2) {
               val nvlArgs =
                 if (args.size > 0) {
@@ -562,9 +696,9 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
                 } else {
                   Seq.empty[(Long, Long)]
                 }
-              lastResult = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 8, None, None).run(
-                if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs)
-                .asInstanceOf[(Long, Long, Int)]
+              lastResult = cm.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs).asInstanceOf[(Long, Long, Int)]
+              // println("NEW RESULT:")
+              // println(lastResult)
               if (lastResult._2 == -1) {
                 useWriter = true
                 writer = new UnsafeRowWriter(new BufferHolder(row, 0), 1)

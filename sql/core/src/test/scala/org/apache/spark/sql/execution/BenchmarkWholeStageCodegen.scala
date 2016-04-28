@@ -72,7 +72,7 @@ class BenchmarkWholeStageCodegen extends SparkFunSuite {
   }
 
   // These benchmark are skipped in normal build
-  test("select-nvl") {
+  ignore("select-nvl") {
     val N = 500L << 20
     runBenchmark("select-nvl", N) {
       sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1").selectExpr("C5 * 2 as foo")
@@ -86,6 +86,27 @@ select-nvl:                         Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)
 -------------------------------------------------------------------------------------------
 select-nvl codegen=false                  270 /  351       1938.3           0.5       1.0X
 select-nvl codegen=true                   170 /  209       3091.0           0.3       1.6X
+    */
+  }
+
+  test("q6-nvl") {
+    val N = 500L << 20
+    runBenchmark("q6-nvl", N) {
+      sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q6-nodict").filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)")
+    }
+    /*
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+q6-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                      192 /  235       2728.8           0.4       1.0X
+q6-nvl codegen=true                       137 /  173       3838.7           0.3       1.4X
+
+q6-nvl (no NVL):                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                      184 /  242       2853.2           0.4       1.0X
+q6-nvl codegen=true                       127 /  135       4131.4           0.2       1.4X
     */
   }
 
