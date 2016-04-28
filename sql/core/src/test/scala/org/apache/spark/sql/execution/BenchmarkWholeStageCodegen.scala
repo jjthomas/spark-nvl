@@ -91,8 +91,9 @@ select-nvl codegen=true                   170 /  209       3091.0           0.3 
 
   test("q6-nvl") {
     val N = 500L << 20
+    val df = sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q6-nodict").cache()
     runBenchmark("q6-nvl", N) {
-      sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q6-nodict").filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)")
+      df.filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)")
     }
     /*
 Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
@@ -107,6 +108,64 @@ q6-nvl (no NVL):                             Best/Avg Time(ms)    Rate(M/s)   Pe
 -------------------------------------------------------------------------------------------
 q6-nvl codegen=false                      184 /  242       2853.2           0.4       1.0X
 q6-nvl codegen=true                       127 /  135       4131.4           0.2       1.4X
+    */
+  }
+
+  test("q1-nvl") {
+    val N = 500L << 20
+    val df = sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q1").cache()
+    runBenchmark("q1-nvl", N) {
+      df.filter("shipdate_long <= 19981111").selectExpr("quantity", "C5", "C6", "C5 * (1 - C6) as a", "C5 * (1 - C6) * (1 + C7) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "C5", "C6", "a", "b")
+    }
+    /*
+(**** WITH NVL ****)
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+q6-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                       45 /   71      11541.6           0.1       1.0X
+q6-nvl codegen=true                        42 /   50      12625.5           0.1       1.1X
+
+[info] - q6-nvl (8 seconds, 797 milliseconds)
+org.apache.spark.sql.execution.WholeStageCodegen$NvlGeneratorException: don't use NVL for scan only
+null
+Running benchmark: q1-nvl
+  Running case: q1-nvl codegen=false
+  Running case: q1-nvl codegen=true
+
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+q1-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q1-nvl codegen=false                       99 /  123       5279.9           0.2       1.0X
+q1-nvl codegen=true                        56 /   77       9379.9           0.1       1.8X
+
+(**** WITHOUT NVL ****)
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+q6-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                       54 /   74       9661.1           0.1       1.0X
+q6-nvl codegen=true                        36 /   46      14611.0           0.1       1.5X
+
+[info] - q6-nvl (9 seconds, 71 milliseconds)
+org.apache.spark.sql.execution.WholeStageCodegen$NvlGeneratorException: don't use NVL for scan only
+null
+Running benchmark: q1-nvl
+  Running case: q1-nvl codegen=false
+  Running case: q1-nvl codegen=true
+
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+q1-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q1-nvl codegen=false                       86 /  126       6107.2           0.2       1.0X
+q1-nvl codegen=true                        57 /   85       9130.0           0.1       1.5X
+
     */
   }
 

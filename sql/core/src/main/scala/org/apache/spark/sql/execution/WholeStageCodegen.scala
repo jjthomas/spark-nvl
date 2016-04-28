@@ -389,6 +389,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
     case Or(l, r) => "(" + genExpr(l, output) + ") || (" + genExpr(r, output) + ")"
     case Add(l, r) => "(" + genExpr(l, output) + ") + (" + genExpr(r, output) + ")"
     case Multiply(l, r) => "(" + genExpr(l, output) + ") * (" + genExpr(r, output) + ")"
+    case Subtract(l, r) => "(" + genExpr(l, output) + ") - (" + genExpr(r, output) + ")"
     case BitwiseAnd(l, r) => "(" + genExpr(l, output) + ") & (" + genExpr(r, output) + ")"
     case EqualTo(l, r) => "(" + genExpr(l, output) + ") == (" + genExpr(r, output) + ")"
     case GreaterThan(l, r) => "(" + genExpr(l, output) + ") > (" + genExpr(r, output) + ")"
@@ -480,9 +481,6 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         stripMargin
     case TungstenAggregate(_, gExpr, aExpr, _, _, _, child) =>
       val childNvl = genNvlHelper(child, args, false)
-      if (gExpr.size > 1) {
-        throw new NvlGeneratorException("more than one groupBy expr in TungstenAggregate")
-      }
       if (!topLevel) {
         throw new NvlGeneratorException("aggregation only allowed at top level")
       }
@@ -508,8 +506,8 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         }).mkString(", ") + "}"
       val updateFunction = s"(a: $typeStruct, b: $typeStruct) => $updateBody"
       val builderType =
-        if (genedGExpr.size == 1) {
-          s"dictMerger[{long, ${nvlType(gExpr(0).dataType)}}, $updateFunction]"
+        if (genedGExpr.size > 0) {
+          s"dictMerger[{long, ${gExpr.map(e => nvlType(e.dataType)).mkString(", ")}}, $updateFunction]"
         } else {
           s"merger[{0L, ${genedAExpr.map(t => t._4).mkString(", ")}}, $updateFunction, $updateFunction]"
         }
@@ -523,7 +521,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         if (genedGExpr.size == 0)
           s"{0L, ${genedAExpr.map(t => t._3).mkString(", ")}}"
         else
-          s"{{0L, ${genedGExpr(0)}}, {${genedAExpr.map(t => t._3).mkString(", ")}}}"
+          s"{{0L, ${genedGExpr.mkString(", ")}}, {${genedAExpr.map(t => t._3).mkString(", ")}}}"
       s"""
          |$childNvl;
          |res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
