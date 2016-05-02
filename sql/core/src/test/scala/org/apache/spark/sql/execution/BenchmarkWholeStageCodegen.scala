@@ -91,11 +91,31 @@ select-nvl codegen=true                   170 /  209       3091.0           0.3 
 
   test("q6-nvl") {
     val N = 500L << 20
-    val df = sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q6-nodict").cache()
     runBenchmark("q6-nvl", N) {
-      df.filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)").collect()
+      sqlContext.read.parquet("/Volumes/RD/tpch-sf1-q6-nodict").filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)").collect()
     }
     /*
+(WITH RAMDISK & nvl)
+Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
+Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
+
+q6-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                     1220 / 1368        429.9           2.3       1.0X
+q6-nvl codegen=true                       836 /  966        627.0           1.6       1.5X
+
+(WITHOUT RAMDISK & nvl)
+q6-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                     1069 / 1334        490.3           2.0       1.0X
+q6-nvl codegen=true                       823 /  928        636.9           1.6       1.3X
+
+(WITH RAMDISK & Java codegen)
+q6-nvl:                             Best/Avg Time(ms)    Rate(M/s)   Per Row(ns)   Relative
+-------------------------------------------------------------------------------------------
+q6-nvl codegen=false                     2775 / 3179        188.9           5.3       1.0X
+q6-nvl codegen=true                      1098 / 1349        477.5           2.1       2.5X
+
 Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
 Intel(R) Core(TM) i5-4260U CPU @ 1.40GHz
 
@@ -111,7 +131,7 @@ q6-nvl codegen=true                       127 /  135       4131.4           0.2 
     */
   }
 
-  test("q1-nvl") {
+  ignore("q1-nvl") {
     val N = 500L << 20
     val df = sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q1").cache()
     runBenchmark("q1-nvl", N) {

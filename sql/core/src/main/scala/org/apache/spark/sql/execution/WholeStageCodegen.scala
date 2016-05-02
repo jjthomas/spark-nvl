@@ -651,6 +651,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           var curPtr = lastResult._1
           // TODO hack for range
           var firstNext = true
+          println("COMPILATION")
           val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 1, None, None)
 
           override def hasNext: Boolean = {
@@ -678,6 +679,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
               val nvlArgs =
                 if (args.size > 0) {
                   val cb = iter.next().asInstanceOf[ColumnarBatch]
+                  println(cb.numRows())
                   (0 until args.size).map(i => {
                     // val cb = n.asInstanceOf[ColumnarBatch]
                     val cv = cb.column(i).asInstanceOf[OffHeapColumnVector]
