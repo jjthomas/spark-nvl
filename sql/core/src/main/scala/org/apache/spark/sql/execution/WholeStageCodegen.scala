@@ -382,22 +382,28 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
   class NvlGeneratorException(msg: String = null, cause: Throwable = null)
     extends java.lang.Exception(msg, cause) {}
 
-  def genExpr(e: Expression, output: Seq[Attribute]): String = e match {
+  def bottomLevelSingleCol(sp: SparkPlan): Boolean = sp match {
+    case Range(_, _, _, _, _) => true
+    case BatchedDataSourceScan(output, _, _, _, _) => output.size == 1
+    case _ => false
+  }
+
+  def genExpr(e: Expression, child: SparkPlan): String = e match {
     case Literal(v, d) => v.toString + (if (d.isInstanceOf[LongType]) "L" else "")
     case IsNotNull(_) => "true"
-    case And(l, r) => "(" + genExpr(l, output) + ") && (" + genExpr(r, output) + ")"
-    case Or(l, r) => "(" + genExpr(l, output) + ") || (" + genExpr(r, output) + ")"
-    case Add(l, r) => "(" + genExpr(l, output) + ") + (" + genExpr(r, output) + ")"
-    case Multiply(l, r) => "(" + genExpr(l, output) + ") * (" + genExpr(r, output) + ")"
-    case Subtract(l, r) => "(" + genExpr(l, output) + ") - (" + genExpr(r, output) + ")"
-    case BitwiseAnd(l, r) => "(" + genExpr(l, output) + ") & (" + genExpr(r, output) + ")"
-    case EqualTo(l, r) => "(" + genExpr(l, output) + ") == (" + genExpr(r, output) + ")"
-    case GreaterThan(l, r) => "(" + genExpr(l, output) + ") > (" + genExpr(r, output) + ")"
-    case GreaterThanOrEqual(l, r) => "(" + genExpr(l, output) + ") >= (" + genExpr(r, output) + ")"
-    case LessThan(l, r) => "(" + genExpr(l, output) + ") < (" + genExpr(r, output) + ")"
-    case LessThanOrEqual(l, r) => "(" + genExpr(l, output) + ") <= (" + genExpr(r, output) + ")"
-    case AttributeReference(n, _, _, _) => "data" + (if (output.size > 1) "." + output.indexWhere(_.name == n) else "")
-    case Alias(c, _) => genExpr(c, output)
+    case And(l, r) => "(" + genExpr(l, child) + ") && (" + genExpr(r, child) + ")"
+    case Or(l, r) => "(" + genExpr(l, child) + ") || (" + genExpr(r, child) + ")"
+    case Add(l, r) => "(" + genExpr(l, child) + ") + (" + genExpr(r, child) + ")"
+    case Multiply(l, r) => "(" + genExpr(l, child) + ") * (" + genExpr(r, child) + ")"
+    case Subtract(l, r) => "(" + genExpr(l, child) + ") - (" + genExpr(r, child) + ")"
+    case BitwiseAnd(l, r) => "(" + genExpr(l, child) + ") & (" + genExpr(r, child) + ")"
+    case EqualTo(l, r) => "(" + genExpr(l, child) + ") == (" + genExpr(r, child) + ")"
+    case GreaterThan(l, r) => "(" + genExpr(l, child) + ") > (" + genExpr(r, child) + ")"
+    case GreaterThanOrEqual(l, r) => "(" + genExpr(l, child) + ") >= (" + genExpr(r, child) + ")"
+    case LessThan(l, r) => "(" + genExpr(l, child) + ") < (" + genExpr(r, child) + ")"
+    case LessThanOrEqual(l, r) => "(" + genExpr(l, child) + ") <= (" + genExpr(r, child) + ")"
+    case AttributeReference(n, _, _, _) => "data" + (if (bottomLevelSingleCol(child)) "" else "." + child.output.indexWhere(_.name == n))
+    case Alias(c, _) => genExpr(c, child)
     case t => throw new NvlGeneratorException(t.getClass.toString)
   }
 
@@ -421,61 +427,44 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
                    topLevel: Boolean): String = sp match {
     case Project(exprs, child) =>
       val childNvl = genNvlHelper(child, args, false)
-      val genedExprs = exprs.map(genExpr(_, child.output))
+      val genedExprs = exprs.map(genExpr(_, child))
       val outElTypes = exprs.map(e => nvlType(e.dataType))
-      val builderType =
-        if (!topLevel)
-          s"{${outElTypes.map(e => "vecBuilder[" + e + "]").mkString(", ")}}"
-        else
-          // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
-          s"vecBuilder[{long, ${outElTypes.mkString(", ")}}]"
+      // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
+      val builderType = s"vecBuilder[{${if (topLevel) "long, " else ""}${outElTypes.mkString(", ")}}]"
       val inElTypes = child.output.map(e => nvlType(e.dataType))
-      val dataType =
-        if (inElTypes.size > 1)
-          s"{${inElTypes.mkString(", ")}}"
-        else
-          inElTypes.mkString(", ")
-      val mergeValue =
-        if (topLevel)
-          s"{0L, ${genedExprs.mkString(", ")}}"
-        else
-          s"{${genedExprs.mkString(", ")}}"
+      var dataType = inElTypes.mkString(", ")
+      if (!bottomLevelSingleCol(child)) {
+        dataType = "{" + dataType + "}"
+      }
+      val mergeValue = s"{${if (topLevel) "0L, " else ""}${genedExprs.mkString(", ")}}"
       s"""
          |$childNvl;
-         |${if (topLevel) "" else "data := "}res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
-         |    $builderType, (blds: $builderType, i: long,
+         |${if (topLevel) "" else "data := "}res(for(data,
+         |    $builderType, (bld: $builderType, i: long,
          |    data: $dataType) =>
-         |    merge(blds, $mergeValue)
+         |    merge(bld, $mergeValue)
          |   ))
        """.
         stripMargin
     case Filter(cond, child) =>
+      val childBottomSingleCol = bottomLevelSingleCol(child)
       val childNvl = genNvlHelper(child, args, false)
-      val genedCond = genExpr(cond, child.output)
+      val genedCond = genExpr(cond, child)
       val inElTypes = child.output.map(e => nvlType(e.dataType))
-      val dataType =
-        if (inElTypes.size > 1)
-          s"{${inElTypes.mkString(", ")}}"
-        else
-          inElTypes.mkString(", ")
-      val builderType =
-        if (!topLevel)
-          s"{${inElTypes.map(e => "vecBuilder[" + e + "]").mkString(", ")}}"
-        else
-          // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
-          s"vecBuilder[{long, ${inElTypes.mkString(", ")}}]"
-      val toMerge = (0 until child.output.size).map(i => "data" + (if (child.output.size > 1) s".$i" else ""))
-      val mergeValue =
-        if (topLevel)
-          s"{0L, ${toMerge.mkString(", ")}}"
-        else
-          s"{${toMerge.mkString(", ")}}"
+      var dataType = inElTypes.mkString(", ")
+      if (!childBottomSingleCol) {
+        dataType = "{" + dataType + "}"
+      }
+      // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
+      val builderType = s"vecBuilder[{${if (topLevel) "long, " else ""}${inElTypes.mkString(", ")}}]"
+      val toMerge = if (childBottomSingleCol) Seq("data") else (0 until child.output.size).map(i => s"data.$i")
+      val mergeValue = s"{${if (topLevel) "0L, " else ""}${toMerge.mkString(", ")}}"
       s"""
          |$childNvl;
-         |${if (topLevel) "" else "data := "}res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
-         |    $builderType, (blds: $builderType, i: long,
+         |${if (topLevel) "" else "data := "}res(for(data,
+         |    $builderType, (bld: $builderType, i: long,
          |    data: $dataType) =>
-         |    if ($genedCond, merge(blds, $mergeValue), blds)
+         |    if ($genedCond, merge(bld, $mergeValue), bld)
          |   ))
        """.
         stripMargin
@@ -484,12 +473,12 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       if (!topLevel) {
         throw new NvlGeneratorException("aggregation only allowed at top level")
       }
-      val genedGExpr = gExpr.map(genExpr(_, child.output))
+      val genedGExpr = gExpr.map(genExpr(_, child))
       val genedAExpr = aExpr.map(a => {
         a.aggregateFunction match {
           case Sum(c) => {
             val cType = nvlType(c.dataType)
-            (cType, a.aggregateFunction, genExpr(c, child.output), nvlZero(c.dataType))
+            (cType, a.aggregateFunction, genExpr(c, child), nvlZero(c.dataType))
           }
           case _ => throw new NvlGeneratorException(a.aggregateFunction.getClass.toString)
         }
@@ -512,11 +501,10 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           s"merger[{0L, ${genedAExpr.map(t => t._4).mkString(", ")}}, $updateFunction, $updateFunction]"
         }
       val inElTypes = child.output.map(e => nvlType(e.dataType))
-      val dataType =
-        if (inElTypes.size > 1)
-          s"{${inElTypes.mkString(", ")}}"
-        else
-          inElTypes.mkString(", ")
+      var dataType = inElTypes.mkString(", ")
+      if (!bottomLevelSingleCol(child)) {
+        dataType = "{" + dataType + "}"
+      }
       val mergeValue =
         if (genedGExpr.size == 0)
           s"{0L, ${genedAExpr.map(t => t._3).mkString(", ")}}"
@@ -524,11 +512,11 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           s"{{0L, ${genedGExpr.mkString(", ")}}, {${genedAExpr.map(t => t._3).mkString(", ")}}}"
       s"""
          |$childNvl;
-         |res(indexedfor({${(0 until child.output.size).map(i => "data." + i).mkString(", ")}}, 0L, len(data.0), 1,
-         |    $builderType, (blds: $builderType, i: long,
+         |${if (genedGExpr.size > 0) "toVec(" else ""}res(for(data,
+         |    $builderType, (bld: $builderType, i: long,
          |    data: $dataType) =>
-         |    merge(blds, $mergeValue)
-         |   ))
+         |    merge(bld, $mergeValue)
+         |   ))${if (genedGExpr.size > 0) ")" else ""}
        """.stripMargin
     case BatchedDataSourceScan(output, _, _, _, _) =>
       if (topLevel) {
@@ -537,12 +525,16 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       for ((out, i) <- output.zipWithIndex) {
         args += (("$" + i, s"vec[${nvlType(out.dataType)}]"))
       }
-      s"data := {${args.map(_._1).mkString(", ")}}"
+      var ret = args.map(_._1).mkString(", ")
+      if (output.size > 1) {
+        ret = "zip(" + ret + ")"
+      }
+      s"data := $ret"
     case Range(s, 1, 1, n, _) =>
       if (topLevel) {
-        throw new NvlGeneratorException("dont use NVL for range only")
+        throw new NvlGeneratorException("don't use NVL for range only")
       }
-      s"data := {range($s, ${s + n})}"
+      s"data := range($s, ${s + n})"
     case t => throw new NvlGeneratorException(t.getClass.toString)
   }
 
@@ -657,9 +649,9 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           val row = new UnsafeRow(1)
           var lastResult : (Long, Long, Int) = (0, 0, 0)
           var curPtr = lastResult._1
-          val cm = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 1, None, None)
           // TODO hack for range
           var firstNext = true
+          val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 1, None, None)
 
           override def hasNext: Boolean = {
             /*
@@ -694,7 +686,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
                 } else {
                   Seq.empty[(Long, Long)]
                 }
-              lastResult = cm.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs).asInstanceOf[(Long, Long, Int)]
+              lastResult = nvlCode.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs).asInstanceOf[(Long, Long, Int)]
               // println("NEW RESULT:")
               // println(lastResult)
               if (lastResult._2 == -1) {

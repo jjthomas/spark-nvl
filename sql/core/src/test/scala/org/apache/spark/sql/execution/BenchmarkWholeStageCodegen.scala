@@ -93,7 +93,7 @@ select-nvl codegen=true                   170 /  209       3091.0           0.3 
     val N = 500L << 20
     val df = sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q6-nodict").cache()
     runBenchmark("q6-nvl", N) {
-      df.filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)")
+      df.filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)").collect()
     }
     /*
 Java HotSpot(TM) 64-Bit Server VM 1.7.0_60-b19 on Mac OS X 10.9.3
@@ -115,7 +115,7 @@ q6-nvl codegen=true                       127 /  135       4131.4           0.2 
     val N = 500L << 20
     val df = sqlContext.read.parquet("/Users/joseph/spark/assembly/tpch-sf1-q1").cache()
     runBenchmark("q1-nvl", N) {
-      df.filter("shipdate_long <= 19981111").selectExpr("quantity", "C5", "C6", "C5 * (1 - C6) as a", "C5 * (1 - C6) * (1 + C7) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "C5", "C6", "a", "b")
+      df.filter("shipdate_long <= 19981111").selectExpr("quantity", "C5", "C6", "C5 * (1 - C6) as a", "C5 * (1 - C6) * (1 + C7) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "C5", "C6", "a", "b").collect()
     }
     /*
 (**** WITH NVL ****)
