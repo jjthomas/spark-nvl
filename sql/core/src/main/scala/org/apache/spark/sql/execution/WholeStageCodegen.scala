@@ -22,6 +22,7 @@ import java.util
 import edu.mit.nvl.llvm.runtime.LlvmCompiler
 import edu.mit.nvl.parser.NvlParser
 import org.apache.spark.sql.catalyst.expressions.aggregate.Sum
+import org.apache.spark.sql.execution.python.PythonUDF
 import org.apache.spark.sql.execution.vectorized.{ColumnarBatch, OffHeapColumnVector}
 import org.apache.spark.{broadcast, TaskContext}
 import org.apache.spark.rdd.RDD
@@ -267,6 +268,8 @@ case class InputAdapter(child: SparkPlan) extends UnaryNode with CodegenSupport 
 
 object WholeStageCodegen {
   val PIPELINE_DURATION_METRIC = "duration"
+  val VECTOR_SIZE = 8
+  val NON_ROW_AGG = true
 }
 
 /**
@@ -388,9 +391,21 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
     case _ => false
   }
 
+  // TODO string substitution very brittle
+  def genPythonUdf(udf: PythonUDF, child: SparkPlan): String = {
+    val exprs = udf.children.map("(" + genExpr(_, child) + ")")
+    val varName = udf.func.nvlHeader.split(":")(0).replace("(", "")
+    var body = udf.func.nvlBody
+    for (i <- 0 until exprs.size) {
+      body = body.replace(s"$varName${if (exprs.size == 1) "" else "." + i}", exprs(i))
+    }
+    body
+  }
+
   def genExpr(e: Expression, child: SparkPlan): String = e match {
     case Literal(v, d) => v.toString + (if (d.isInstanceOf[LongType]) "L" else "")
     case IsNotNull(_) => "true"
+    case udf @ PythonUDF(_, _, _, _) => genPythonUdf(udf, child)
     case And(l, r) => "(" + genExpr(l, child) + ") && (" + genExpr(r, child) + ")"
     case Or(l, r) => "(" + genExpr(l, child) + ") || (" + genExpr(r, child) + ")"
     case Add(l, r) => "(" + genExpr(l, child) + ") + (" + genExpr(r, child) + ")"
@@ -484,21 +499,32 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         }
       })
       // TODO assuming we won't have more than 64 columns so only one null bitfield is needed ...
-      var typeStruct = "{" + (if (genedGExpr.size == 0) "long, " else "") + genedAExpr.map(t => t._1).mkString(", ") + "}"
+      var typeStruct = genedAExpr.map(t => t._1).mkString(", ")
+      if (!(WholeStageCodegen.NON_ROW_AGG && genedGExpr.size == 0 && genedAExpr.size == 1))
+        typeStruct = "{" + (if (genedGExpr.size == 0) "long, " else "") + typeStruct + "}"
       var updateBody =
-        "{" + (if (genedGExpr.size == 0) "0L, " else "") +
         genedAExpr.zipWithIndex.map(t => t._1._2 match {
           case Sum(_) =>
-            val increment = if (genedGExpr.size == 0) 1 else 0
-            s"a.${t._2 + increment} + b.${t._2 + increment}"
+            val field =
+              if (genedGExpr.size == 0) {
+                if (WholeStageCodegen.NON_ROW_AGG && genedAExpr.size == 1) "" else "." + (t._2 + 1)
+              } else {
+                "." + t._2
+              }
+            s"a$field + b$field"
           case _ => ""
-        }).mkString(", ") + "}"
+        }).mkString(", ")
+      if (!(WholeStageCodegen.NON_ROW_AGG && genedGExpr.size == 0 && genedAExpr.size == 1))
+        updateBody = "{" + (if (genedGExpr.size == 0) "0L, " else "") + updateBody + "}"
       val updateFunction = s"(a: $typeStruct, b: $typeStruct) => $updateBody"
       val builderType =
         if (genedGExpr.size > 0) {
           s"dictMerger[{long, ${gExpr.map(e => nvlType(e.dataType)).mkString(", ")}}, $updateFunction]"
         } else {
-          s"merger[{0L, ${genedAExpr.map(t => t._4).mkString(", ")}}, $updateFunction, $updateFunction]"
+          var zeros = genedAExpr.map(t => t._4).mkString(", ")
+          if (!(WholeStageCodegen.NON_ROW_AGG && genedAExpr.size == 1))
+            zeros = "{0L, " + zeros + "}"
+          s"merger[$zeros, $updateFunction, $updateFunction]"
         }
       val inElTypes = child.output.map(e => nvlType(e.dataType))
       var dataType = inElTypes.mkString(", ")
@@ -506,10 +532,12 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         dataType = "{" + dataType + "}"
       }
       val mergeValue =
-        if (genedGExpr.size == 0)
-          s"{0L, ${genedAExpr.map(t => t._3).mkString(", ")}}"
-        else
+        if (genedGExpr.size == 0) {
+          val base = genedAExpr.map(t => t._3).mkString(", ")
+          if (WholeStageCodegen.NON_ROW_AGG && genedAExpr.size == 1) base else "{0L, " + base + "}"
+        } else {
           s"{{0L, ${genedGExpr.mkString(", ")}}, {${genedAExpr.map(t => t._3).mkString(", ")}}}"
+        }
       s"""
          |$childNvl;
          |${if (genedGExpr.size > 0) "toVec(" else ""}res(for(data,
@@ -633,8 +661,18 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         """.stripMargin
       */
 
+      /*
+      val customSchema = StructType(Array(StructField("year", IntegerType, true),
+      StructField("make", StringType, true),
+      StructField("model", StringType, true),
+      StructField("comment", StringType, true),
+      StructField("blank", StringType, true)))
+       */
+
       // assume rdds.length == 1
       // sqlContext.sparkContext.hadoopConfiguration.setBoolean("parquet.enable.dictionary", false)
+      // sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.block.size", 5L * 1024 * 1024 * 1024)
+      // sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.page.size", 5L * 1024 * 1024 * 1024)
       // sqlContext.read.format("csv").option("inferSchema", "true").option("delimiter", "|").option("mode", "FAILFAST").load("/Users/joseph/tpch-perf/tpch/lineitem.tbl").write.parquet("tpch-sf1")
       // val df2 = df.withColumn("shipdate", df("C10").cast(StringType)).withColumn("quantity", df("C4").cast(LongType))
       // val toLong = udf[Long, String]( _.split(" ")(0).replace("-", "").toLong)
@@ -646,13 +684,14 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       rdds.head.mapPartitionsWithIndex { (index, iter) =>
         new Iterator[InternalRow] {
           var index = 0
-          val row = new UnsafeRow(1)
+          val row = new UnsafeRow(child.output.size)
           var lastResult : (Long, Long, Int) = (0, 0, 0)
           var curPtr = lastResult._1
           // TODO hack for range
           var firstNext = true
-          println("COMPILATION")
-          val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), 1, None, None)
+          val millis1 = System.nanoTime()
+          val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), WholeStageCodegen.VECTOR_SIZE, None, None)
+          // println((System.nanoTime() - millis1) / 1000000.0)
 
           override def hasNext: Boolean = {
             /*
@@ -688,7 +727,9 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
                 } else {
                   Seq.empty[(Long, Long)]
                 }
+              val millis2 = System.nanoTime()
               lastResult = nvlCode.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs).asInstanceOf[(Long, Long, Int)]
+              println(("CODE: " + (System.nanoTime() - millis2) / 1000000.0))
               // println("NEW RESULT:")
               // println(lastResult)
               if (lastResult._2 == -1) {

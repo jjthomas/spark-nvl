@@ -1701,7 +1701,7 @@ def _wrap_function(sc, func, returnType):
     command = (func, returnType)
     pickled_command, broadcast_vars, env, includes = _prepare_for_python_RDD(sc, command)
     return sc._jvm.PythonFunction(bytearray(pickled_command), env, includes, sc.pythonExec,
-                                  sc.pythonVer, broadcast_vars, sc._javaAccumulator)
+                                  sc.pythonVer, broadcast_vars, sc._javaAccumulator, func.nvlHdr, func.nvlBody)
 
 
 class UserDefinedFunction(object):

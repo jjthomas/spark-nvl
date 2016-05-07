@@ -47,7 +47,8 @@ class QueryExecution(val sqlContext: SQLContext, val logical: LogicalPlan) {
 
   lazy val withCachedData: LogicalPlan = {
     assertAnalyzed()
-    sqlContext.cacheManager.useCachedData(analyzed)
+    // sqlContext.cacheManager.useCachedData(analyzed)
+    analyzed
   }
 
   lazy val optimizedPlan: LogicalPlan = sqlContext.sessionState.optimizer.execute(withCachedData)
@@ -74,7 +75,7 @@ class QueryExecution(val sqlContext: SQLContext, val logical: LogicalPlan) {
 
   /** A sequence of rules that will be applied in order to the physical plan before execution. */
   protected def preparations: Seq[Rule[SparkPlan]] = Seq(
-    python.ExtractPythonUDFs,
+    // python.ExtractPythonUDFs,
     PlanSubqueries(sqlContext),
     EnsureRequirements(sqlContext.conf),
     CollapseCodegenStages(sqlContext.conf),

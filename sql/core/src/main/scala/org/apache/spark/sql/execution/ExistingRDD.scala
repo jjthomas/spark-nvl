@@ -301,11 +301,17 @@ private[sql] case class BatchedDataSourceScan(
        |}
        |while ($batch != null) {
        |  int numRows = $batch.numRows();
+       |  long startingTime = System.nanoTime();
+       |  System.out.println("ROWS: " + numRows);
        |  while ($idx < numRows) {
        |    int $rowidx = $idx++;
        |    ${consume(ctx, columnsBatchInput).trim}
-       |    if (shouldStop()) return;
+       |    if (shouldStop()) {
+       |      System.out.println("TIME: " + ((System.nanoTime() - startingTime) / 1000000.0));
+       |      return;
+       |    }
        |  }
+       |  System.out.println("TIME: " + ((System.nanoTime() - startingTime) / 1000000.0));
        |  $batch = null;
        |  $nextBatch();
        |}

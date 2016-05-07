@@ -75,7 +75,9 @@ private[spark] case class PythonFunction(
     pythonExec: String,
     pythonVer: String,
     broadcastVars: JList[Broadcast[PythonBroadcast]],
-    accumulator: Accumulator[JList[Array[Byte]]])
+    accumulator: Accumulator[JList[Array[Byte]]],
+    nvlHeader: String,
+    nvlBody: String)
 
 /**
  * A wrapper for chained Python functions (from bottom to top).
