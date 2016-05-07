@@ -35,6 +35,7 @@ public abstract class BufferedRowIterator {
   // used when there is no column in output
   protected UnsafeRow unsafeRow = new UnsafeRow(0);
   private long startTimeNs = System.nanoTime();
+  protected double totalTime = 0.0;
 
   protected int partitionIndex = -1;
 
@@ -42,7 +43,11 @@ public abstract class BufferedRowIterator {
     if (currentRows.isEmpty()) {
       processNext();
     }
-    return !currentRows.isEmpty();
+    boolean retVal = !currentRows.isEmpty();
+    if (!retVal) {
+      System.out.println("Total Time: " + totalTime);
+    }
+    return retVal;
   }
 
   public InternalRow next() {

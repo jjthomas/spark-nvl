@@ -689,8 +689,9 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           var curPtr = lastResult._1
           // TODO hack for range
           var firstNext = true
-          val millis1 = System.nanoTime()
+          // val millis1 = System.nanoTime()
           val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), WholeStageCodegen.VECTOR_SIZE, None, None)
+          var totalTime = 0.0
           // println((System.nanoTime() - millis1) / 1000000.0)
 
           override def hasNext: Boolean = {
@@ -702,11 +703,16 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
             println(lastResult._2)
             println("END")
             */
-            if (!hasRange) {
-              index < lastResult._2 || iter.hasNext
-            } else {
-              firstNext || index < lastResult._2
+            val ret =
+              if (!hasRange) {
+                index < lastResult._2 || iter.hasNext
+              } else {
+                firstNext || index < lastResult._2
+              }
+            if (!ret) {
+              println("TOTAL TIME: " + totalTime)
             }
+            ret
           }
 
           override def next: InternalRow = {
@@ -729,7 +735,9 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
                 }
               val millis2 = System.nanoTime()
               lastResult = nvlCode.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs).asInstanceOf[(Long, Long, Int)]
-              println(("CODE: " + (System.nanoTime() - millis2) / 1000000.0))
+              val singleTime = (System.nanoTime() - millis2) / 1000000.0
+              println("CODE: " + singleTime)
+              totalTime += singleTime
               // println("NEW RESULT:")
               // println(lastResult)
               if (lastResult._2 == -1) {

@@ -307,11 +307,15 @@ private[sql] case class BatchedDataSourceScan(
        |    int $rowidx = $idx++;
        |    ${consume(ctx, columnsBatchInput).trim}
        |    if (shouldStop()) {
-       |      System.out.println("TIME: " + ((System.nanoTime() - startingTime) / 1000000.0));
+       |      double singleTime = (System.nanoTime() - startingTime) / 1000000.0;
+       |      System.out.println("TIME: " + singleTime);
+       |      totalTime += singleTime;
        |      return;
        |    }
        |  }
-       |  System.out.println("TIME: " + ((System.nanoTime() - startingTime) / 1000000.0));
+       |  double singleTime = (System.nanoTime() - startingTime) / 1000000.0;
+       |  System.out.println("TIME: " + singleTime);
+       |  totalTime += singleTime;
        |  $batch = null;
        |  $nextBatch();
        |}
