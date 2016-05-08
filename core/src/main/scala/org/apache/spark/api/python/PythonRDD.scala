@@ -40,7 +40,6 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.{SerializableConfiguration, Utils}
 
-
 private[spark] class PythonRDD(
     parent: RDD[_],
     func: PythonFunction,
@@ -180,6 +179,8 @@ private[spark] class PythonRunner(
               val init = initTime - bootTime
               val finish = finishTime - initTime
               val total = finishTime - startTime
+              println("Adding time...")
+              PythonRDD.totalTime += total
               logInfo("Times: total = %s, boot = %s, init = %s, finish = %s".format(total, boot,
                 init, finish))
               val memoryBytesSpilled = stream.readLong()
@@ -405,6 +406,8 @@ private object SpecialLengths {
 }
 
 private[spark] object PythonRDD extends Logging {
+
+  var totalTime = 0L
 
   // remember the broadcasts sent to each worker
   private val workerBroadcasts = new mutable.WeakHashMap[Socket, mutable.Set[Long]]()

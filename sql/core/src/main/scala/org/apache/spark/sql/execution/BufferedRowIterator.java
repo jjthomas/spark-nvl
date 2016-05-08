@@ -20,6 +20,7 @@ package org.apache.spark.sql.execution;
 import java.io.IOException;
 import java.util.LinkedList;
 
+import org.apache.spark.api.python.PythonRDD;
 import scala.collection.Iterator;
 
 import org.apache.spark.TaskContext;
@@ -47,6 +48,7 @@ public abstract class BufferedRowIterator {
     if (!retVal) {
       WholeStageCodegen.incTotalTime(totalTime);
       System.out.println("Total Time: " + WholeStageCodegen.totalTime());
+      System.out.println("Total Python Time: " + PythonRDD.totalTime());
     }
     return retVal;
   }
