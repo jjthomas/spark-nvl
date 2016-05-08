@@ -45,7 +45,8 @@ public abstract class BufferedRowIterator {
     }
     boolean retVal = !currentRows.isEmpty();
     if (!retVal) {
-      System.out.println("Total Time: " + totalTime);
+      WholeStageCodegen.incTotalTime(totalTime);
+      System.out.println("Total Time: " + WholeStageCodegen.totalTime());
     }
     return retVal;
   }

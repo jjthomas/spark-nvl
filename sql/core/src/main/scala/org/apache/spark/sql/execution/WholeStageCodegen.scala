@@ -268,8 +268,13 @@ case class InputAdapter(child: SparkPlan) extends UnaryNode with CodegenSupport 
 
 object WholeStageCodegen {
   val PIPELINE_DURATION_METRIC = "duration"
-  val VECTOR_SIZE = 8
-  val NON_ROW_AGG = true
+  val VECTOR_SIZE = 1
+  val NON_ROW_AGG = false
+  var totalTime = 0.0
+
+  def incTotalTime(t: Double): Unit = {
+    totalTime += t
+  }
 }
 
 /**
@@ -598,6 +603,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
     }
     */
 
+    WholeStageCodegen.totalTime = 0.0
     var useNvl = true
     var nvlStr : String = null
     val args = ArrayBuffer.empty[(String, String)]
@@ -710,7 +716,8 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
                 firstNext || index < lastResult._2
               }
             if (!ret) {
-              println("TOTAL TIME: " + totalTime)
+              // println("TOTAL TIME: " + totalTime)
+              WholeStageCodegen.totalTime += totalTime
             }
             ret
           }
