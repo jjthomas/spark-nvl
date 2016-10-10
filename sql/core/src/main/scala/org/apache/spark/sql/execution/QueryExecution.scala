@@ -47,8 +47,8 @@ class QueryExecution(val sqlContext: SQLContext, val logical: LogicalPlan) {
 
   lazy val withCachedData: LogicalPlan = {
     assertAnalyzed()
-    // sqlContext.cacheManager.useCachedData(analyzed)
-    analyzed
+    sqlContext.cacheManager.useCachedData(analyzed)
+    // analyzed
   }
 
   lazy val optimizedPlan: LogicalPlan = sqlContext.sessionState.optimizer.execute(withCachedData)

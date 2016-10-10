@@ -22,6 +22,7 @@ import java.util
 import edu.mit.nvl.llvm.runtime.LlvmCompiler
 import edu.mit.nvl.parser.NvlParser
 import org.apache.spark.sql.catalyst.expressions.aggregate.Sum
+import org.apache.spark.sql.execution.columnar.{CachedBatch, InMemoryColumnarTableScan}
 import org.apache.spark.sql.execution.python.PythonUDF
 import org.apache.spark.sql.execution.vectorized.{ColumnarBatch, OffHeapColumnVector}
 import org.apache.spark.{broadcast, TaskContext}
@@ -307,6 +308,9 @@ object WholeStageCodegen {
  */
 case class WholeStageCodegen(child: SparkPlan) extends UnaryNode with CodegenSupport {
 
+  var cachedRdd: RDD[CachedBatch] = null
+  var exprMapping: Array[Int] = null
+
   override def output: Seq[Attribute] = child.output
 
   override def outputPartitioning: Partitioning = child.outputPartitioning
@@ -568,6 +572,26 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         throw new NvlGeneratorException("don't use NVL for range only")
       }
       s"data := range($s, ${s + n})"
+    case InputAdapter(child @ InMemoryColumnarTableScan(output, _, mem)) =>
+      exprMapping = new Array(output.size)
+      // code copied from above case
+      if (topLevel) {
+        throw new NvlGeneratorException("don't use NVL for scan only")
+      }
+      for ((out, i) <- output.zipWithIndex) {
+        exprMapping(i) = mem.output.indexWhere(_.name == out.name)
+        if (exprMapping(i) == -1) {
+          throw new NvlGeneratorException(s"InputAdapter: couldn't find ${out.name}" +
+            s" in ${mem.output.mkString(",")}")
+        }
+        args += (("$" + i, s"vec[${nvlType(out.dataType)}]"))
+      }
+      var ret = args.map(_._1).mkString(", ")
+      if (output.size > 1) {
+        ret = "zip(" + ret + ")"
+      }
+      cachedRdd = mem.cachedColumnBuffers
+      s"data := $ret"
     case t => throw new NvlGeneratorException(t.getClass.toString)
   }
 
@@ -604,7 +628,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
     */
 
     WholeStageCodegen.totalTime = 0.0
-    var useNvl = true
+    var useNvl = System.getProperty("useNvl", "true").toBoolean
     var nvlStr : String = null
     val args = ArrayBuffer.empty[(String, String)]
     try {
@@ -679,15 +703,20 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       // sqlContext.sparkContext.hadoopConfiguration.setBoolean("parquet.enable.dictionary", false)
       // sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.block.size", 5L * 1024 * 1024 * 1024)
       // sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.page.size", 5L * 1024 * 1024 * 1024)
+      // sqlContext.read.parquet("tpch-sf10").coalesce(1).write.parquet("tpch-sf10-coalesce")
       // sqlContext.read.format("csv").option("inferSchema", "true").option("delimiter", "|").option("mode", "FAILFAST").load("/Users/joseph/tpch-perf/tpch/lineitem.tbl").write.parquet("tpch-sf1")
       // val df2 = df.withColumn("shipdate", df("C10").cast(StringType)).withColumn("quantity", df("C4").cast(LongType))
+      // table.withColumn("shipdate", toLong(table("C10").cast(StringType))).withColumn("quantity", table("C4").cast(LongType)).withColumn(
       // val toLong = udf[Long, String]( _.split(" ")(0).replace("-", "").toLong)
+      // val DoubletoLong = udf[Long, Double]( d => (d * 100).toLong)
+      // table.withColumn("shipdate", toLong(table("C10").cast(StringType))).withColumn("quantity", table("C4").cast(LongType)).withColumn("returnflag", C8toLong(table("C8"))).withColumn("linestatus", C9toLong(table("C9"))).withColumn("extendedprice", DoubletoLong(table("C5"))).withColumn("discount", DoubletoLong(table("C6"))).withColumn("tax", DoubletoLong(table("C7"))).write.parquet("tpch-sf10")
       // df2.withColumn("shipdate_long", toLong(df2("shipdate"))).select("shipdate_long", "C6", "quantity", "C5").write.parquet("tpch-sf1-q6")
-      // sqlContext.read.parquet("tpch-sf1-q6-nodict").filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)").explain
+      // sqlContext.read.parquet("tpch-sf10").filter("shipdate >= 19940101 and shipdate < 19950101 and discount >= 5 and discount <= 7 and quantity < 24").selectExpr("sum(extendedprice * discount)").explain
       // val C8toLong = udf[Long, String]( s => if (s == "N") 0L else if (s == "R") 1L else 2L)
       // val C9toLong = udf[Long, String]( s => if (s == "O") 0L else 1L)
-      // sqlContext.read.parquet("tpch-sf1-q1").filter("shipdate_long <= 19981111").selectExpr("quantity", "C5", "C6", "C5 * (1 - C6) as a", "C5 * (1 - C6) * (1 + C7) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "C5", "C6", "a", "b")
-      rdds.head.mapPartitionsWithIndex { (index, iter) =>
+      // val DoubletoLong = udf[Long, Double]( d => (d * 100).toLong)
+      // sqlContext.read.parquet("tpch-sf10").filter("shipdate <= 19981111").selectExpr("quantity", "extendedprice", "discount", "extendedprice * (100 - discount) as a", "extendedprice * (100 - discount) * (100 + tax) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "extendedprice", "discount", "a", "b")
+      cachedRdd.mapPartitionsWithIndex { (index, iter) =>
         new Iterator[InternalRow] {
           var index = 0
           val row = new UnsafeRow(child.output.size)
@@ -730,18 +759,18 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
             if (index >= lastResult._2) {
               val nvlArgs =
                 if (args.size > 0) {
-                  val cb = iter.next().asInstanceOf[ColumnarBatch]
-                  println(cb.numRows())
+                  val cb = iter.next()
+                  println(cb.numRows)
                   (0 until args.size).map(i => {
                     // val cb = n.asInstanceOf[ColumnarBatch]
-                    val cv = cb.column(i).asInstanceOf[OffHeapColumnVector]
-                    (cv.valuesNativeAddress(), cb.numRows().toLong)
+                    (cb.offHeapBuffers(exprMapping(i)), cb.numRows.toLong)
                   })
                 } else {
                   Seq.empty[(Long, Long)]
                 }
               val millis2 = System.nanoTime()
-              lastResult = nvlCode.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs).asInstanceOf[(Long, Long, Int)]
+              lastResult = nvlCode.run(if (nvlArgs.size == 1) nvlArgs(0) else nvlArgs)
+                .asInstanceOf[(Long, Long, Int)]
               val singleTime = (System.nanoTime() - millis2) / 1000000.0
               println("CODE: " + singleTime)
               totalTime += singleTime

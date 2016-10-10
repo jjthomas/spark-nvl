@@ -302,19 +302,19 @@ private[sql] case class BatchedDataSourceScan(
        |while ($batch != null) {
        |  int numRows = $batch.numRows();
        |  long startingTime = System.nanoTime();
-       |  System.out.println("ROWS: " + numRows);
+       |  // System.out.println("ROWS: " + numRows);
        |  while ($idx < numRows) {
        |    int $rowidx = $idx++;
        |    ${consume(ctx, columnsBatchInput).trim}
        |    if (shouldStop()) {
        |      double singleTime = (System.nanoTime() - startingTime) / 1000000.0;
-       |      System.out.println("TIME: " + singleTime);
+       |      // System.out.println("TIME: " + singleTime);
        |      totalTime += singleTime;
        |      return;
        |    }
        |  }
        |  double singleTime = (System.nanoTime() - startingTime) / 1000000.0;
-       |  System.out.println("TIME: " + singleTime);
+       |  // System.out.println("TIME: " + singleTime);
        |  totalTime += singleTime;
        |  $batch = null;
        |  $nextBatch();

@@ -27,7 +27,7 @@ import org.apache.spark.api.python.{ChainedPythonFunctions, PythonRunner}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
-import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.{WholeStageCodegen, SparkPlan}
 import org.apache.spark.sql.types.{DataType, StructField, StructType}
 
 
@@ -94,7 +94,7 @@ case class BatchPythonEvaluation(udfs: Seq[PythonUDF], output: Seq[Attribute], c
       val pickle = new Pickler(needConversion)
       // Input iterator to Python: input rows are grouped so we send them in batches to Python.
       // For each row, add it to the queue.
-      val inputIterator = iter.grouped(100).map { inputRows =>
+      val inputIterator = iter.grouped(100000).map { inputRows =>
         val toBePickled = inputRows.map { inputRow =>
           queue.add(inputRow)
           val row = projection(inputRow)

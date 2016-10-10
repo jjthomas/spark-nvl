@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.execution.columnar
 
+import org.apache.spark.unsafe.Platform
+
 import scala.collection.mutable.ArrayBuffer
 
 import org.apache.spark.{Accumulable, Accumulator, Accumulators}
@@ -51,8 +53,8 @@ private[sql] object InMemoryRelation {
  * @param buffers The buffers for serialized columns
  * @param stats The stat of columns
  */
-private[columnar]
-case class CachedBatch(numRows: Int, buffers: Array[Array[Byte]], stats: InternalRow)
+case class CachedBatch(numRows: Int, buffers: Array[Array[Byte]], offHeapBuffers: Array[Long],
+                       stats: InternalRow)
 
 private[sql] case class InMemoryRelation(
     output: Seq[Attribute],
@@ -166,9 +168,15 @@ private[sql] case class InMemoryRelation(
                         .flatMap(_.values))
 
           batchStats += stats
-          CachedBatch(rowCount, columnBuilders.map { builder =>
+          val arrays = columnBuilders.map { builder =>
             JavaUtils.bufferToArray(builder.build())
-          }, stats)
+          }
+          val offHeapArrays = arrays.map { array =>
+            val address = Platform.allocateMemory(array.length)
+            Platform.copyMemory(array, Platform.BYTE_ARRAY_OFFSET, null, address, array.length)
+            address
+          }
+          CachedBatch(rowCount, arrays, offHeapArrays, stats)
         }
 
         def hasNext: Boolean = rowIterator.hasNext

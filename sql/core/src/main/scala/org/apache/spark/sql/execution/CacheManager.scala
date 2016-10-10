@@ -92,8 +92,8 @@ private[sql] class CacheManager extends Logging {
         CachedData(
           planToCache,
           InMemoryRelation(
-            sqlContext.conf.useCompression,
-            sqlContext.conf.columnBatchSize,
+            false,
+            10000000,
             storageLevel,
             sqlContext.executePlan(planToCache).executedPlan,
             tableName))
