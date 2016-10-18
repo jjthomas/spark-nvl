@@ -269,7 +269,6 @@ case class InputAdapter(child: SparkPlan) extends UnaryNode with CodegenSupport 
 
 object WholeStageCodegen {
   val PIPELINE_DURATION_METRIC = "duration"
-  val VECTOR_SIZE = 1
   val NON_ROW_AGG = false
   var totalTime = 0.0
 
@@ -629,6 +628,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
 
     WholeStageCodegen.totalTime = 0.0
     var useNvl = System.getProperty("useNvl", "true").toBoolean
+    val vectorSize = System.getProperty("vectorSize", "1").toInt
     var nvlStr : String = null
     val args = ArrayBuffer.empty[(String, String)]
     try {
@@ -725,7 +725,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           // TODO hack for range
           var firstNext = true
           // val millis1 = System.nanoTime()
-          val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), WholeStageCodegen.VECTOR_SIZE, None, None)
+          val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), vectorSize, None, None)
           var totalTime = 0.0
           // println((System.nanoTime() - millis1) / 1000000.0)
 

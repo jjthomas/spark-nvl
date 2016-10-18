@@ -93,7 +93,7 @@ private[sql] class CacheManager extends Logging {
           planToCache,
           InMemoryRelation(
             false,
-            10000000,
+            20000000,
             storageLevel,
             sqlContext.executePlan(planToCache).executedPlan,
             tableName))
