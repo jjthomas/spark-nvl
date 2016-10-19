@@ -639,6 +639,9 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
         useNvl = false
       }
     }
+    if (useNvl && System.getProperty("nvlStr") != null) {
+     nvlStr = System.getProperty("nvlStr")
+    }
     println(nvlStr)
     val hasRange = if (nvlStr != null) nvlStr.contains("range") else false
 
