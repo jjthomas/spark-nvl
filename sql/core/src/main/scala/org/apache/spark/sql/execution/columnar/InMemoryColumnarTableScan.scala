@@ -131,6 +131,7 @@ private[sql] case class InMemoryRelation(
 
   private def buildBuffers(): Unit = {
     val output = child.output
+    val doOffHeap = System.getProperty("offHeap", "true").toBoolean
     val cached = child.execute().mapPartitionsInternal { rowIterator =>
       new Iterator[CachedBatch] {
         def next(): CachedBatch = {
@@ -171,12 +172,16 @@ private[sql] case class InMemoryRelation(
           val arrays = columnBuilders.map { builder =>
             JavaUtils.bufferToArray(builder.build())
           }
-          val offHeapArrays = arrays.map { array =>
-            val address = Platform.allocateMemory(array.length)
-            Platform.copyMemory(array, Platform.BYTE_ARRAY_OFFSET, null, address, array.length)
-            address
+          if (doOffHeap) {
+            val offHeapArrays = arrays.map { array =>
+              val address = Platform.allocateMemory(array.length)
+              Platform.copyMemory(array, Platform.BYTE_ARRAY_OFFSET, null, address, array.length)
+              address
+            }
+            CachedBatch(rowCount, null, offHeapArrays, stats)
+          } else {
+            CachedBatch(rowCount, arrays, null, stats)
           }
-          CachedBatch(rowCount, arrays, offHeapArrays, stats)
         }
 
         def hasNext: Boolean = rowIterator.hasNext

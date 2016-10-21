@@ -703,9 +703,12 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
        */
 
       // assume rdds.length == 1
-      // sqlContext.sparkContext.hadoopConfiguration.setBoolean("parquet.enable.dictionary", false)
-      // sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.block.size", 5L * 1024 * 1024 * 1024)
-      // sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.page.size", 5L * 1024 * 1024 * 1024)
+      // sqlContext.sparkContext.hadoopConfiguration.set("fs.s3n.awsAccessKeyId", "AKIAICOJSI32PSWWNHRA"); sqlContext.sparkContext.hadoopConfiguration.set("fs.s3n.awsSecretAccessKey", "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")
+      // sqlContext.sparkContext.hadoopConfiguration.setBoolean("parquet.enable.dictionary", false); sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.block.size", 1024 * 1024 * 1024); sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.page.size", 1024 * 1024 * 1024)
+      // case class Q1(shipdate_long: Long, C6: Double, quantity: Long, C5: Double, C7: Double, returnflag: Long, linestatus: Long)
+      // s3://jjthomas-spark-sql-weld/tpch-sf10-q1
+      // val x = for (x <- 1 to 10) yield s"s3n://jjthomas-spark-sql-weld/tpch-sf10-q1-$x/"
+      // df.as[Q1].flatMap(r => Array(r, r)).write.parquet("q1-doubled-largeblock")
       // sqlContext.read.parquet("tpch-sf10").coalesce(1).write.parquet("tpch-sf10-coalesce")
       // sqlContext.read.format("csv").option("inferSchema", "true").option("delimiter", "|").option("mode", "FAILFAST").load("/Users/joseph/tpch-perf/tpch/lineitem.tbl").write.parquet("tpch-sf1")
       // val df2 = df.withColumn("shipdate", df("C10").cast(StringType)).withColumn("quantity", df("C4").cast(LongType))
