@@ -703,6 +703,8 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
        */
 
       // assume rdds.length == 1
+      // val a = new scala.collection.mutable.ArrayBuffer[Long]; for (i <- 0 until 20) { val start = System.currentTimeMillis; df.filter("shipdate_long <= 19981111").selectExpr("quantity", "C5", "C6", "C5 * (1 - C6) as a", "C5 * (1 - C6) * (1 + C7) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "C5", "C6", "a", "b").show(); a.append(System.currentTimeMillis - start) }; a; a.min
+      // val a = new scala.collection.mutable.ArrayBuffer[Long]; for (i <- 0 until 20) { val start = System.currentTimeMillis; df.filter("shipdate_long >= 19940101 and shipdate_long < 19950101 and C6 >= 0.05 and C6 <= 0.07 and quantity < 24").selectExpr("sum(C5 * C6)").show(); a.append(System.currentTimeMillis - start) }; a; a.min
       // sqlContext.sparkContext.hadoopConfiguration.set("fs.s3n.awsAccessKeyId", "AKIAICOJSI32PSWWNHRA"); sqlContext.sparkContext.hadoopConfiguration.set("fs.s3n.awsSecretAccessKey", "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")
       // sqlContext.sparkContext.hadoopConfiguration.setBoolean("parquet.enable.dictionary", false); sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.block.size", 1024 * 1024 * 1024); sqlContext.sparkContext.hadoopConfiguration.setLong("parquet.page.size", 1024 * 1024 * 1024)
       // case class Q1(shipdate_long: Long, C6: Double, quantity: Long, C5: Double, C7: Double, returnflag: Long, linestatus: Long)
@@ -722,6 +724,18 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
       // val C9toLong = udf[Long, String]( s => if (s == "O") 0L else 1L)
       // val DoubletoLong = udf[Long, Double]( d => (d * 100).toLong)
       // sqlContext.read.parquet("tpch-sf10").filter("shipdate <= 19981111").selectExpr("quantity", "extendedprice", "discount", "extendedprice * (100 - discount) as a", "extendedprice * (100 - discount) * (100 + tax) as b", "returnflag", "linestatus").groupBy("returnflag", "linestatus").sum("quantity", "extendedprice", "discount", "a", "b")
+      // df.withColumn("a", explode(array((1 to 100).map(_ => lit(1L)): _*))).withColumn("b", explode(array((1 to 100).map(_ => lit(1L)): _*))).withColumn("c", explode(array((1 to 100).map(_ => lit(1L)): _*))).drop('id).write.parquet("udf-test")
+      // df = sqlContext.read.parquet("assembly/udf-test").cache()
+      // SparkContext.setSystemProperty("useNvl", "true")
+      // SparkContext.setSystemProperty("offHeap", "true")
+      // from pyspark.sql.types import *
+      // from pyspark.sql.functions import udf
+      // from nvludfs import *
+      // @nvl("(long,long,long)->long", tupargs=True)
+      // def dot_prod(a,b,c):
+      //   return 3*a+2*b+c
+      // dot_udf = udf(dot_prod, LongType())
+      // df.withColumn("udf", dot_udf(df['a'], df['b'], df['c'])).selectExpr("sum(udf)").show()
       cachedRdd.mapPartitionsWithIndex { (index, iter) =>
         new Iterator[InternalRow] {
           var index = 0
@@ -733,7 +747,7 @@ rang/sum codegen=true                     543 /  675        965.7           1.0 
           // val millis1 = System.nanoTime()
           val nvlCode = LlvmCompiler.compile(new NvlParser().parseFunction(nvlStr), vectorSize, None, None)
           var totalTime = 0.0
-          // println((System.nanoTime() - millis1) / 1000000.0)
+          // println("compile time: " + ((System.nanoTime() - millis1) / 1000000.0))
 
           override def hasNext: Boolean = {
             /*

@@ -70,12 +70,18 @@ class QueryExecution(val sqlContext: SQLContext, val logical: LogicalPlan) {
    * row format conversions as needed.
    */
   protected def prepareForExecution(plan: SparkPlan): SparkPlan = {
-    preparations.foldLeft(plan) { case (sp, rule) => rule.apply(sp) }
+    preparations.foldLeft(plan) { case (sp, rule) => {
+      if (rule == python.ExtractPythonUDFs && System.getProperty("pythonNvl", "false").toBoolean) {
+        sp
+      } else {
+        rule.apply(sp)
+      }
+    } }
   }
 
   /** A sequence of rules that will be applied in order to the physical plan before execution. */
   protected def preparations: Seq[Rule[SparkPlan]] = Seq(
-    // python.ExtractPythonUDFs,
+    python.ExtractPythonUDFs,
     PlanSubqueries(sqlContext),
     EnsureRequirements(sqlContext.conf),
     CollapseCodegenStages(sqlContext.conf),
